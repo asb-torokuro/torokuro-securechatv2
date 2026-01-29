@@ -1,0 +1,8 @@
+{
+  "name": "SecureChat",
+  "description": "A secure, encrypted chat system featuring biometric-style login, admin surveillance, large file handling simulation, and real-time AI voice communication.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
