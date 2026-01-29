@@ -53,14 +53,21 @@ const App = () => {
   
   useEffect(() => {
     if (!currentUser) return;
+    
+    // 管理者はFirestore上に存在しない仮想ユーザーのため、リスナーを設定しない
+    // これを設定するとFirestoreにデータがないため即座にlogout()が呼ばれてしまう
+    if (currentUser.role === UserRole.ADMIN) return;
+
     const unsubscribe = listenToUser(currentUser.id, (updatedUser) => {
         if (updatedUser) {
              setCurrentUser(updatedUser);
              const fetchFriends = async () => {
                  const friendsData: User[] = [];
-                 for(const fid of updatedUser.friends) {
-                     const f = await getUserById(fid);
-                     if(f) friendsData.push(f);
+                 if (updatedUser.friends) {
+                    for(const fid of updatedUser.friends) {
+                        const f = await getUserById(fid);
+                        if(f) friendsData.push(f);
+                    }
                  }
                  setMyFriendObjects(friendsData);
              };
@@ -70,7 +77,7 @@ const App = () => {
         }
     });
     return () => unsubscribe();
-  }, [currentUser?.id]);
+  }, [currentUser?.id, currentUser?.role]);
 
   useEffect(() => {
     if (!currentRoom) return;
@@ -80,12 +87,12 @@ const App = () => {
              setCurrentRoom(null);
              return;
          }
-         if (currentUser && updatedRoom.bannedUsers.includes(currentUser.id) && currentUser.role !== UserRole.ADMIN) {
+         if (currentUser && updatedRoom.bannedUsers?.includes(currentUser.id) && currentUser.role !== UserRole.ADMIN) {
              alert("You have been banned.");
              setCurrentRoom(null);
              return;
          }
-         if (currentUser && !updatedRoom.participants.includes(currentUser.id) && currentUser.role !== UserRole.ADMIN) {
+         if (currentUser && !updatedRoom.participants?.includes(currentUser.id) && currentUser.role !== UserRole.ADMIN) {
              alert("You have been kicked.");
              setCurrentRoom(null);
              return;
@@ -107,10 +114,10 @@ const App = () => {
   }, [currentUser]);
 
   useEffect(() => {
-    if (currentRoom && currentUser) {
+    if (currentRoom && currentUser && currentRoom.messages) {
       markMessagesAsRead(currentRoom.id, currentUser.id, currentRoom);
     }
-  }, [currentRoom?.messages.length]);
+  }, [currentRoom?.messages?.length]);
 
   const withTimeout = <T,>(promise: Promise<T>, ms: number = 8000): Promise<T> => {
       return Promise.race([
@@ -505,7 +512,7 @@ const App = () => {
                 {friendRequestMsg && <p className="text-[10px] text-green-500 mb-2">{friendRequestMsg}</p>}
                 
                 {/* Friend Requests */}
-                {currentUser.friendRequests.length > 0 && (
+                {currentUser.friendRequests && currentUser.friendRequests.length > 0 && (
                      <div className="mb-2 space-y-1">
                         {currentUser.friendRequests.map(fid => (
                             <div key={fid} className="bg-primary/10 border border-primary/30 p-2 rounded text-xs flex justify-between items-center">
@@ -601,7 +608,7 @@ const App = () => {
                             {currentRoom.type === 'private' ? '🔒 PRIVATE LINK' : `# ${currentRoom.name}`}
                             <span className="text-[10px] bg-gray-700 px-1 rounded text-gray-400 font-mono">{currentRoom.id}</span>
                         </h2>
-                        <p className="text-[10px] text-gray-400">{currentRoom.participants.length} connected entities</p>
+                        <p className="text-[10px] text-gray-400">{currentRoom.participants ? currentRoom.participants.length : 0} connected entities</p>
                     </div>
                     <div className="flex gap-4">
                         <button 
@@ -620,7 +627,7 @@ const App = () => {
                     className="flex-1 overflow-y-auto p-6 space-y-6"
                     style={{ backgroundImage: 'radial-gradient(circle at center, #1e293b 1px, transparent 1px)', backgroundSize: '24px 24px' }}
                 >
-                    {currentRoom.messages.map((msg) => {
+                    {(currentRoom.messages || []).map((msg) => {
                         const isMe = msg.sender === 'user' && msg.senderName === currentUser.username;
                         const isSystem = msg.sender === 'system';
                         const isAI = msg.sender === 'ai';
