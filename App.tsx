@@ -31,7 +31,7 @@ const App = () => {
 
   // Room State
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null);
-  const [roomMessages, setRoomMessages] = useState<Message[]>([]); // Messages are now managed separately
+  const [roomMessages, setRoomMessages] = useState<Message[]>([]); // メッセージは別ステートで管理
   const [joinRoomId, setJoinRoomId] = useState('');
   const [newRoomName, setNewRoomName] = useState('');
   const [availableRooms, setAvailableRooms] = useState<Room[]>([]);
@@ -80,7 +80,7 @@ const App = () => {
     return () => unsubscribe();
   }, [currentUser?.id, currentUser?.role]);
 
-  // Listen to Room Metadata
+  // ルーム情報のリスナー（メタデータのみ）
   useEffect(() => {
     if (!currentRoom) return;
     const unsubscribe = listenToRoom(currentRoom.id, (updatedRoom) => {
@@ -102,13 +102,13 @@ const App = () => {
              setRoomMessages([]);
              return;
          }
-         // Keep the messages state intact, only update room metadata
+         // メッセージはlistenToMessagesで取得するため、ここでは上書きしないように注意
          setCurrentRoom(prev => prev ? { ...updatedRoom, messages: [] } : updatedRoom);
     });
     return () => unsubscribe();
   }, [currentRoom?.id]);
 
-  // Listen to Messages (Subcollection)
+  // メッセージ履歴のリスナー（サブコレクション）
   useEffect(() => {
       if (!currentRoom) return;
       
@@ -119,7 +119,6 @@ const App = () => {
   }, [currentRoom?.id]);
 
   useEffect(() => {
-      // Fix strict comparison logic for conditional effect
       if (!currentUser) return;
       if (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.USER) return;
 
@@ -133,7 +132,7 @@ const App = () => {
     if (currentRoom && currentUser && roomMessages.length > 0) {
       markMessagesAsRead(currentRoom.id, currentUser.id, roomMessages);
     }
-  }, [roomMessages.length, currentRoom?.id]); // Depend on roomMessages.length
+  }, [roomMessages.length, currentRoom?.id]); 
 
   const withTimeout = <T,>(promise: Promise<T>, ms: number = 8000): Promise<T> => {
       return Promise.race([
@@ -257,7 +256,7 @@ const App = () => {
         addLog('ROOM_JOIN', `User ${currentUser.username} joining ${targetId}`, 'info');
         setJoinRoomId('');
         setCurrentRoom({ id: targetId } as Room);
-        setRoomMessages([]); // Clear previous messages immediately
+        setRoomMessages([]); // 部屋切り替え時にメッセージをリセット
     } else {
       alert(result.error || 'Room not found or access denied');
     }
@@ -278,7 +277,6 @@ const App = () => {
   };
 
   const handleSendMessage = async (file?: File) => {
-    // Modified: Removed !apiKey check to allow messages without AI key
     if ((!inputText.trim() && !file) || !currentUser || !currentRoom) return;
     
     if (currentRoom.mutedUsers?.includes(currentUser.id) && currentUser.role !== UserRole.ADMIN) {
@@ -433,7 +431,7 @@ const App = () => {
     if (chatContainerRef.current) {
       chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
     }
-  }, [roomMessages]); // Update scroll when messages change
+  }, [roomMessages]); 
 
   const getReadReceiptText = (msg: Message) => {
     if (msg.sender !== 'user' || !currentRoom) return null;
