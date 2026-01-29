@@ -336,10 +336,9 @@ const App = () => {
       content: encryptMessage(inputText || (file ? `Sent a file: ${file.name}` : '')),
       timestamp,
       type: msgType,
-      fileName: file?.name,
-      fileSize: file?.size,
       isEncrypted: true,
-      readBy: []
+      readBy: [],
+      ...(file ? { fileName: file.name, fileSize: file.size } : {})
     };
 
     try {
