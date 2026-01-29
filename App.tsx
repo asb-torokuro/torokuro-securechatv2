@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { User, UserRole, Message, Room } from './types';
 import { 
@@ -13,6 +14,7 @@ import {
   markMessagesAsRead, sendFriendRequest, handleFriendRequest, getUserById,
   executeCommand, listenToUser, listenToRoom, listenToPublicRooms, searchUsersByName, recordUserLogin
 } from './services/storageService';
+import { isFirebaseConfigured } from './services/firebase';
 import AdminPanel from './components/AdminPanel';
 import VoiceInterface from './components/VoiceInterface';
 import { GoogleGenAI } from '@google/genai';
@@ -50,14 +52,11 @@ const App = () => {
 
   // --- Real-time Listeners ---
   
-  // 1. Listen to Current User Updates (Friends, Requests)
   useEffect(() => {
     if (!currentUser) return;
-    // Subscribe to Firestore updates for my user profile
     const unsubscribe = listenToUser(currentUser.id, (updatedUser) => {
         if (updatedUser) {
              setCurrentUser(updatedUser);
-             // Also fetch friend objects details
              const fetchFriends = async () => {
                  const friendsData: User[] = [];
                  for(const fid of updatedUser.friends) {
@@ -68,14 +67,12 @@ const App = () => {
              };
              fetchFriends();
         } else {
-            // User deleted?
             logout();
         }
     });
     return () => unsubscribe();
   }, [currentUser?.id]);
 
-  // 2. Listen to Current Room Updates (Messages)
   useEffect(() => {
     if (!currentRoom) return;
     const unsubscribe = listenToRoom(currentRoom.id, (updatedRoom) => {
@@ -84,7 +81,6 @@ const App = () => {
              setCurrentRoom(null);
              return;
          }
-         // Check kick/ban
          if (currentUser && updatedRoom.bannedUsers.includes(currentUser.id) && currentUser.role !== UserRole.ADMIN) {
              alert("You have been banned.");
              setCurrentRoom(null);
@@ -100,44 +96,51 @@ const App = () => {
     return () => unsubscribe();
   }, [currentRoom?.id]);
 
-  // 3. Listen to Public Rooms (Lobby)
   useEffect(() => {
-      if (!currentUser && currentUser?.role !== UserRole.ADMIN) return;
+      // Fix strict comparison logic for conditional effect
+      if (!currentUser) return;
+      if (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.USER) return;
+
       const unsubscribe = listenToPublicRooms((rooms) => {
           setAvailableRooms(rooms);
       });
       return () => unsubscribe();
   }, [currentUser]);
 
-
-  // 4. Mark Read
   useEffect(() => {
     if (currentRoom && currentUser) {
       markMessagesAsRead(currentRoom.id, currentUser.id, currentRoom);
     }
   }, [currentRoom?.messages.length]);
 
-
-  // --- Auth Handlers ---
-  const withTimeout = <T,>(promise: Promise<T>, ms: number = 5000): Promise<T> => {
+  const withTimeout = <T,>(promise: Promise<T>, ms: number = 8000): Promise<T> => {
       return Promise.race([
           promise,
-          new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Database connection timeout. Check your Firebase Config in services/firebase.ts")), ms))
+          new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Database connection timeout. Firebaseの設定を確認してください。")), ms))
       ]);
   };
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError({ type: null, message: '' });
+    
+    // Check Firebase Config
+    if (!isFirebaseConfigured()) {
+        setAuthError({ 
+            type: 'general', 
+            message: 'Firebaseのキーが設定されていません。services/firebase.ts を編集してください。' 
+        });
+        return;
+    }
+
     setIsAuthProcessing(true);
 
     try {
         if (!username || !password) {
-        setAuthError({ type: 'general', message: 'Credentials required.' });
-        return;
+            setAuthError({ type: 'general', message: 'ユーザー名とパスワードを入力してください。' });
+            return;
         }
 
-        // 1. Check Admin
         if (username === ADMIN_USERNAME) {
             if(password === ADMIN_PASSWORD) {
                 const adminUser: User = {
@@ -153,35 +156,30 @@ const App = () => {
                 addLog('LOGIN_SUCCESS', `Admin access granted`, 'alert');
                 return;
             } else {
-                setAuthError({ type: 'password', message: 'Invalid password.' });
+                setAuthError({ type: 'password', message: '管理者パスワードが違います。' });
                 return;
             }
         }
 
         if (isLogin) {
-            // Login - wrapped in timeout
             const foundUsers = await withTimeout(searchUsersByName(username));
-            
             if (foundUsers.length === 0) {
-                setAuthError({ type: 'username', message: 'User not found.' });
+                setAuthError({ type: 'username', message: 'ユーザーが見つかりません。' });
                 return;
             }
             const user = foundUsers[0];
             if (verifyPassword(password, user.passwordHash)) {
                 setCurrentUser(user);
-                // Don't await this one to avoid blocking UI if it's slow
                 recordUserLogin(user.id).catch(console.error);
                 addLog('LOGIN_SUCCESS', `User ${username} logged in`, 'info');
             } else {
-                setAuthError({ type: 'password', message: 'Invalid password.' });
+                setAuthError({ type: 'password', message: 'パスワードが正しくありません。' });
                 addLog('LOGIN_FAIL', `Bad password for ${username}`, 'warning');
             }
         } else {
-            // Register - wrapped in timeout
             const foundUsers = await withTimeout(searchUsersByName(username));
-            
             if (foundUsers.length > 0) {
-                setAuthError({ type: 'username', message: 'Username taken.' });
+                setAuthError({ type: 'username', message: 'そのユーザー名は既に使用されています。' });
                 return;
             }
             const newUser: User = {
@@ -216,13 +214,9 @@ const App = () => {
     setAuthError({ type: null, message: '' });
   };
 
-  // --- Room Handlers ---
   const handleCreateRoom = async () => {
     if (!newRoomName.trim() || !currentUser) return;
-    
-    // Generate 7 digit random ID
     const roomId = Math.floor(1000000 + Math.random() * 9000000).toString();
-    
     const newRoom: Room = {
       id: roomId,
       name: newRoomName,
@@ -234,11 +228,7 @@ const App = () => {
       bannedUsers: [],
       mutedUsers: []
     };
-
     await createRoom(newRoom);
-    // Auto join by setting ID (listener will pick it up after we run joinRoom inside create usually, but here createRoom just saves it)
-    // We need to explicitly set currentRoom locally or wait for it.
-    // However, since we are the creator, we should jump in.
     setCurrentRoom(newRoom); 
     addLog('ROOM_CREATE', `Group Room ${roomId} created by ${currentUser.username}`, 'info');
     setNewRoomName('');
@@ -247,28 +237,17 @@ const App = () => {
   const handleJoinRoom = async (id?: string) => {
     const targetId = id || joinRoomId;
     if (!targetId.trim() || !currentUser) return;
-
     const isAdmin = currentUser.role === UserRole.ADMIN;
     const result = await joinRoom(targetId, currentUser.id, isAdmin);
-    
     if (result.success) {
-        // We set current room. The useEffect listener will fetch the full data.
-        // But we need initial data to avoid null flash.
-        // For simplicity, we assume success means we can start listening.
-        // We will fetch it once to set state.
-        // But wait, listenToRoom needs an ID.
-        // We can just set a dummy object with ID and let listener fill it, 
-        // OR fetch once.
         addLog('ROOM_JOIN', `User ${currentUser.username} joining ${targetId}`, 'info');
         setJoinRoomId('');
-        // To trigger the listener:
         setCurrentRoom({ id: targetId } as Room);
     } else {
       alert(result.error || 'Room not found or access denied');
     }
   };
 
-  // --- Friend Handlers ---
   const handleSendRequest = async () => {
       if(!currentUser || !friendSearchName.trim()) return;
       setFriendRequestMsg('Sending...');
@@ -283,11 +262,8 @@ const App = () => {
       await handleFriendRequest(currentUser.id, requesterId, action);
   };
 
-  // --- Chat Handlers ---
   const handleSendMessage = async (file?: File) => {
     if ((!inputText.trim() && !file) || !currentUser || !apiKey || !currentRoom) return;
-
-    // Check Mute (locally first for speed)
     if (currentRoom.mutedUsers?.includes(currentUser.id) && currentUser.role !== UserRole.ADMIN) {
         alert("TRANSMISSION BLOCKED: You are muted.");
         return;
@@ -320,16 +296,13 @@ const App = () => {
     let msgType: Message['type'] = 'text';
     let base64File = '';
 
-    // File Processing
     if (file) {
       if (file.size > MAX_FILE_SIZE_BYTES) {
         alert(`File too large. Limit is 10GB.`);
         return;
       }
-      
       const isImage = file.type.startsWith('image/');
       msgType = isImage ? 'image' : file.type.startsWith('video/') ? 'video' : file.type.startsWith('audio/') ? 'audio' : 'file';
-      
       if (file.size < 5 * 1024 * 1024) {
         base64File = await new Promise((resolve) => {
           const reader = new FileReader();
@@ -342,7 +315,6 @@ const App = () => {
       }
     }
 
-    // 1. Add User Message
     const userMsg: Message = {
       id: Date.now().toString(),
       sender: 'user',
@@ -357,18 +329,13 @@ const App = () => {
     };
 
     await addMessageToRoom(currentRoom.id, userMsg);
-
     const prompt = inputText;
     setInputText('');
     if (fileInputRef.current) fileInputRef.current.value = '';
-    
-    // Log Activity
     addLog('MESSAGE_SENT', `User ${currentUser.username} sent message`, 'info');
 
-    // 2. Call Gemini ONLY if invoked with @ai
     if (prompt.toLowerCase().includes('@ai')) {
       setIsLoading(true);
-
       try {
         const ai = new GoogleGenAI({ apiKey });
         let responseText = '';
@@ -406,9 +373,7 @@ const App = () => {
           isEncrypted: true,
           readBy: []
         };
-        
         await addMessageToRoom(currentRoom.id, aiMsg);
-
       } catch (err: any) {
           console.error(err);
           const errorMsg: Message = {
@@ -434,29 +399,19 @@ const App = () => {
     }
   }, [currentRoom?.messages]);
 
-  // --- HELPER FOR READ RECEIPTS ---
   const getReadReceiptText = (msg: Message) => {
     if (msg.sender !== 'user' || !currentRoom) return null;
     if (msg.senderName !== currentUser?.username) return null; 
-
     const readers = msg.readBy ? msg.readBy.filter(id => id !== currentUser.id) : [];
-    
-    if (readers.length === 0) return <span className="text-gray-600">Delivered</span>;
-    
-    // We only have IDs, showing just count or 'Read' for simplicity unless we fetch names.
-    // For now, let's just say "READ"
-    return <span className="text-green-600 font-bold animate-pulse text-[9px]">READ BY {readers.length}</span>;
+    if (readers.length === 0) return <span className="text-gray-600">送信済み</span>;
+    return <span className="text-green-600 font-bold animate-pulse text-[9px]">既読 {readers.length}</span>;
   };
 
-
-  // --- RENDER ---
-
-  // 1. Admin View
-  if (currentUser?.role === UserRole.ADMIN) {
+  // Safe check for admin role to avoid TS overlap error
+  if (currentUser && (currentUser.role as UserRole) === UserRole.ADMIN) {
     return <AdminPanel onLogout={logout} />;
   }
 
-  // 2. Login View
   if (!currentUser) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-900 p-4 font-mono relative overflow-hidden">
@@ -468,7 +423,7 @@ const App = () => {
         <div className="bg-gray-800/80 backdrop-blur-md p-8 rounded-lg shadow-[0_0_50px_rgba(0,0,0,0.5)] w-full max-w-md border border-gray-700 relative z-10 border-t-primary/50">
           <div className="text-center mb-8 relative">
             <div className="w-16 h-1 bg-primary mx-auto mb-4 shadow-[0_0_10px_#3b82f6]"></div>
-            <h1 className="text-3xl font-bold text-white mb-2 tracking-[0.2em] text-shadow">SECURE CHAT</h1>
+            <h1 className="text-3xl font-bold text-white mb-2 tracking-[0.2em] text-shadow uppercase">Secure Chat</h1>
             <p className="text-primary text-[10px] uppercase tracking-widest">Biometric Handshake Protocol v4.2</p>
           </div>
 
@@ -496,7 +451,7 @@ const App = () => {
               {authError.type === 'password' && <span className="text-red-500 text-[10px] absolute -bottom-4 right-0">{authError.message}</span>}
             </div>
 
-            {authError.type === 'general' && <div className="text-red-500 text-sm text-center border border-red-900/50 bg-red-900/20 p-2 rounded">{authError.message}</div>}
+            {authError.type === 'general' && <div className="text-red-500 text-xs text-center border border-red-900/50 bg-red-900/20 p-3 rounded leading-tight">{authError.message}</div>}
 
             <button
               type="submit"
@@ -510,10 +465,10 @@ const App = () => {
 
           <div className="mt-8 text-center border-t border-gray-700 pt-4">
             <button
-              onClick={() => { setIsLogin(!isLogin); setAuthError({type: null, message: ''}); }}
-              className="text-gray-500 hover:text-primary text-xs tracking-wider transition-colors"
+              onClick={() => { setIsLogin(!isLogin); setAuthError({ type: null, message: '' }); }}
+              className="text-primary text-xs hover:underline uppercase tracking-widest"
             >
-              {isLogin ? '[ CREATE NEW IDENTITY ]' : '[ RETURN TO LOGIN ]'}
+              {isLogin ? "Need an account? Register" : "Already have an account? Login"}
             </button>
           </div>
         </div>
@@ -521,304 +476,264 @@ const App = () => {
     );
   }
 
-  // 3. Lobby View (Room Selection)
-  if (!currentRoom) {
-     const requestUsers = currentUser.friendRequests; // IDs only
-     
-     return (
-        <div className="min-h-screen bg-gray-900 text-gray-100 font-mono flex flex-col">
-            <header className="p-4 flex justify-between items-center border-b border-gray-800 bg-gray-900/90 backdrop-blur sticky top-0 z-20">
-                <div className="flex items-center gap-4">
-                    <div className="w-10 h-10 rounded bg-primary/20 flex items-center justify-center text-primary font-bold border border-primary/50">
-                       {currentUser.username.substring(0,2).toUpperCase()}
-                    </div>
-                    <div>
-                       <div className="text-white font-bold tracking-wider">{currentUser.username}</div>
-                       <div className="text-[10px] text-green-500">ONLINE // ID: {currentUser.id.slice(-6)}</div>
-                    </div>
-                </div>
-                <button onClick={logout} className="text-red-500 hover:text-red-400 text-xs border border-red-900 hover:border-red-500 px-3 py-1 rounded transition-colors">ABORT SESSION</button>
-            </header>
-
-            <div className="flex-1 overflow-auto p-4 md:p-8">
-                <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-8">
-                    
-                    {/* LEFT COL: Channels */}
-                    <div className="lg:col-span-2 space-y-8">
-                        {/* Create/Join */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="bg-gray-800/50 p-6 rounded-xl border border-primary/20 hover:border-primary/50 transition-all">
-                                <h2 className="text-lg font-bold mb-4 text-white flex items-center gap-2"><span className="text-primary">✚</span> INITIALIZE CHANNEL</h2>
-                                <div className="flex gap-2">
-                                    <input 
-                                        type="text" 
-                                        placeholder="Channel Name"
-                                        value={newRoomName}
-                                        onChange={(e) => setNewRoomName(e.target.value)}
-                                        className="flex-1 bg-gray-900 border border-gray-700 text-white p-2 rounded focus:border-primary focus:outline-none text-sm"
-                                    />
-                                    <button onClick={handleCreateRoom} className="bg-primary hover:bg-primary-dark text-white px-4 rounded text-sm font-bold">→</button>
-                                </div>
-                            </div>
-                            <div className="bg-gray-800/50 p-6 rounded-xl border border-green-500/20 hover:border-green-500/50 transition-all">
-                                <h2 className="text-lg font-bold mb-4 text-white flex items-center gap-2"><span className="text-green-500">⚡</span> JOIN FREQUENCY</h2>
-                                <div className="flex gap-2">
-                                    <input 
-                                        type="text" 
-                                        placeholder="ID (7-digits)"
-                                        maxLength={7}
-                                        value={joinRoomId}
-                                        onChange={(e) => setJoinRoomId(e.target.value)}
-                                        className="flex-1 bg-gray-900 border border-gray-700 text-white p-2 rounded focus:border-green-500 focus:outline-none text-sm text-center tracking-widest"
-                                    />
-                                    <button onClick={() => handleJoinRoom()} className="bg-green-600 hover:bg-green-700 text-white px-4 rounded text-sm font-bold">→</button>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Recent Rooms */}
-                        <div>
-                            <h3 className="text-gray-500 text-xs font-bold mb-4 tracking-widest">ACTIVE CHANNELS</h3>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                {availableRooms.filter(r => r.participants.includes(currentUser.id)).map(r => (
-                                    <button key={r.id} onClick={() => handleJoinRoom(r.id)} className="bg-gray-800 border border-gray-700 p-4 rounded hover:bg-gray-700 hover:border-primary/50 text-left transition-all group relative overflow-hidden">
-                                        <div className="absolute top-0 right-0 p-1">
-                                            <div className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_#22c55e]"></div>
-                                        </div>
-                                        <div className="font-bold text-gray-200 group-hover:text-primary">{r.name}</div>
-                                        <div className="text-xs text-gray-500 font-mono">#{r.id}</div>
-                                    </button>
-                                ))}
-                                {availableRooms.filter(r => r.participants.includes(currentUser.id)).length === 0 && (
-                                    <div className="text-gray-600 text-sm italic">No active channels detected.</div>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* RIGHT COL: Friends */}
-                    <div className="bg-gray-800/30 border-l border-gray-800 pl-8 space-y-8">
-                        
-                        {/* Add Friend */}
-                        <div>
-                            <h3 className="text-gray-500 text-xs font-bold mb-4 tracking-widest">ADD CONTACT</h3>
-                            <div className="flex gap-2 mb-2">
-                                <input 
-                                    type="text" 
-                                    placeholder="Username"
-                                    value={friendSearchName}
-                                    onChange={(e) => setFriendSearchName(e.target.value)}
-                                    className="w-full bg-gray-900 border border-gray-700 text-white p-2 rounded focus:border-primary focus:outline-none text-xs"
-                                />
-                                <button onClick={handleSendRequest} className="bg-gray-700 hover:bg-gray-600 text-white px-3 rounded text-xs">ADD</button>
-                            </div>
-                            {friendRequestMsg && <div className={`text-[10px] ${friendRequestMsg.includes('sent') ? 'text-green-500' : 'text-red-500'}`}>{friendRequestMsg}</div>}
-                        </div>
-
-                        {/* Requests */}
-                        {requestUsers.length > 0 && (
-                            <div>
-                                <h3 className="text-yellow-500 text-xs font-bold mb-4 tracking-widest animate-pulse">PENDING REQUESTS</h3>
-                                <div className="space-y-2">
-                                    {requestUsers.map(uid => (
-                                        <div key={uid} className="bg-yellow-900/10 border border-yellow-900/30 p-2 rounded flex justify-between items-center">
-                                            <span className="text-sm font-bold text-yellow-100">{uid} (ID)</span>
-                                            <div className="flex gap-1">
-                                                <button onClick={() => handleRequestAction(uid, 'accept')} className="text-green-500 hover:bg-green-900/20 p-1 rounded">✓</button>
-                                                <button onClick={() => handleRequestAction(uid, 'reject')} className="text-red-500 hover:bg-red-900/20 p-1 rounded">✕</button>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Friends List */}
-                        <div>
-                            <h3 className="text-gray-500 text-xs font-bold mb-4 tracking-widest">ENCRYPTED CONTACTS</h3>
-                            <div className="space-y-2 max-h-[400px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-gray-700">
-                                {myFriendObjects.map(f => {
-                                    // Construct private ID again
-                                    const privateRoomId = `private-${[currentUser.id, f.id].sort().join('-')}`;
-                                    
-                                    return (
-                                        <div key={f.id} className="group flex items-center justify-between p-2 rounded hover:bg-gray-800 transition-colors cursor-pointer" onClick={() => handleJoinRoom(privateRoomId)}>
-                                            <div className="flex items-center gap-3">
-                                                <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                                                <span className="text-sm text-gray-300 group-hover:text-white">{f.username}</span>
-                                            </div>
-                                            <svg className="w-4 h-4 text-gray-600 group-hover:text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path></svg>
-                                        </div>
-                                    );
-                                })}
-                                {myFriendObjects.length === 0 && <div className="text-gray-700 text-xs text-center py-4">No contacts added.</div>}
-                            </div>
-                        </div>
-
-                    </div>
-                </div>
-            </div>
-        </div>
-     );
-  }
-
-  // 4. Chat View
-  // Ensure currentRoom messages is not undefined (could happen during init)
-  const messages = currentRoom.messages || [];
+  // --- Main Chat UI ---
 
   return (
-    <div className="flex flex-col h-screen bg-gray-900 text-gray-100 font-mono overflow-hidden">
-      {/* Header */}
-      <header className="flex-none h-16 bg-gray-800 border-b border-gray-700 flex items-center justify-between px-6 shadow-md z-10">
-        <div className="flex items-center gap-3">
-            <div className={`w-3 h-3 rounded-full ${currentRoom.type === 'private' ? 'bg-blue-500' : 'bg-green-500'} animate-pulse`}></div>
+    <div className="flex h-screen bg-gray-900 text-gray-200 font-sans overflow-hidden">
+      {/* Sidebar */}
+      <div className="w-80 bg-gray-800 border-r border-gray-700 flex flex-col hidden md:flex">
+        <div className="p-4 border-b border-gray-700">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-primary to-primary-dark flex items-center justify-center text-white font-bold shadow-lg shadow-primary/20">
+                {currentUser.username.substring(0,2).toUpperCase()}
+            </div>
             <div>
-                <h2 className="text-lg font-bold text-white tracking-wider flex items-center gap-2">
-                   {currentRoom.type === 'private' ? currentRoom.name.replace(currentUser.username, '').replace('&', '').trim() : currentRoom.name} 
-                   {currentRoom.type === 'group' && <span className="text-primary bg-primary/10 px-2 py-0.5 rounded text-xs">#{currentRoom.id}</span>}
-                </h2>
-                <div className="text-[10px] text-gray-400">
-                    {currentRoom.type === 'private' ? 'DIRECT ENCRYPTED LINK' : `PARTICIPANTS: ${currentRoom.participants?.length || 0} // ID: ${currentUser.username}`}
+                <div className="font-bold text-white">{currentUser.username}</div>
+                <div className="text-[10px] text-primary flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                    ONLINE // ENCRYPTED
                 </div>
             </div>
+          </div>
         </div>
-        <div className="flex gap-4">
-            <button 
-                onClick={() => setIsVoiceActive(true)}
-                className="bg-gray-700 hover:bg-gray-600 text-green-400 px-4 py-2 rounded border border-gray-600 flex items-center gap-2 transition-colors"
-            >
-                <span className="w-2 h-2 rounded-full bg-green-400"></span>
-                VOICE LINK
-            </button>
-            <button 
-                onClick={() => setCurrentRoom(null)}
-                className="text-gray-400 hover:text-white text-sm uppercase tracking-wide border border-gray-700 hover:border-gray-500 px-3 py-2 rounded"
-            >
-                CLOSE LINK
-            </button>
-        </div>
-      </header>
 
-      {/* Messages Area */}
-      <div 
-        ref={chatContainerRef}
-        className="flex-1 overflow-y-auto p-4 space-y-6 scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent"
-      >
-        {messages.map((msg) => {
-            const isMe = msg.sender === 'user' && msg.senderName === currentUser.username;
-            const decryptedContent = decryptMessage(msg.content);
-
-            return (
-                <div key={msg.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[70%] ${isMe ? 'items-end' : 'items-start'} flex flex-col`}>
-                        <div className={`flex items-center gap-2 mb-1 text-[10px] text-gray-500 uppercase`}>
-                            <span>{msg.sender === 'ai' ? 'AI TERMINAL' : msg.senderName || 'Unknown'}</span>
-                            <span>{new Date(msg.timestamp).toLocaleTimeString()}</span>
-                            {msg.isEncrypted && (
-                                <span className="text-green-600 flex items-center gap-1">
-                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
-                                    AES
-                                </span>
-                            )}
-                        </div>
-                        
-                        <div className={`p-4 rounded-lg relative overflow-hidden group border ${
-                            isMe 
-                            ? 'bg-primary/10 border-primary/30 text-blue-100 rounded-tr-none' 
-                            : msg.sender === 'system' ? 'bg-red-900/20 border-red-800 text-red-200'
-                            : 'bg-gray-800 border-gray-700 text-gray-200 rounded-tl-none'
-                        }`}>
-                            
-                            {/* File Attachment Indicator */}
-                            {msg.fileName && (
-                                <div className="mb-3 flex items-center gap-3 bg-black/20 p-2 rounded border border-white/10">
-                                    <div className="text-2xl">
-                                        {msg.type === 'image' ? '🖼️' : msg.type === 'video' ? '🎥' : msg.type === 'audio' ? '🎵' : '📁'}
-                                    </div>
-                                    <div>
-                                        <div className="font-bold text-xs truncate max-w-[150px]">{msg.fileName}</div>
-                                        <div className="text-[10px] opacity-70">{formatBytes(msg.fileSize || 0)}</div>
-                                    </div>
-                                </div>
-                            )}
-
-                            <div className="whitespace-pre-wrap leading-relaxed">{decryptedContent}</div>
-                        </div>
-
-                        {/* Read Receipts Display */}
-                        {isMe && (
-                             <div className="mt-1 flex justify-end">
-                                {getReadReceiptText(msg)}
-                             </div>
-                        )}
-                    </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-6">
+            
+            {/* Friends Section */}
+            <div>
+                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Contacts</h3>
+                <div className="flex gap-2 mb-2">
+                    <input 
+                        type="text" 
+                        value={friendSearchName} 
+                        onChange={e => setFriendSearchName(e.target.value)}
+                        placeholder="Add Username" 
+                        className="w-full bg-black/30 border border-gray-700 rounded px-2 py-1 text-xs focus:border-primary outline-none"
+                    />
+                    <button onClick={handleSendRequest} className="bg-primary/20 text-primary border border-primary/50 rounded px-2 text-xs hover:bg-primary/30">+</button>
                 </div>
-            );
-        })}
-        {isLoading && (
-             <div className="flex justify-start">
-                 <div className="bg-gray-800 p-4 rounded-lg rounded-tl-none border border-gray-700 flex items-center gap-2">
-                     <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce"></div>
-                     <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce delay-75"></div>
-                     <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce delay-150"></div>
+                {friendRequestMsg && <p className="text-[10px] text-green-500 mb-2">{friendRequestMsg}</p>}
+                
+                {/* Friend Requests */}
+                {currentUser.friendRequests.length > 0 && (
+                     <div className="mb-2 space-y-1">
+                        {currentUser.friendRequests.map(fid => (
+                            <div key={fid} className="bg-primary/10 border border-primary/30 p-2 rounded text-xs flex justify-between items-center">
+                                <span>Request: {fid}</span> {/* Ideally fetch username */}
+                                <div className="flex gap-1">
+                                    <button onClick={() => handleRequestAction(fid, 'accept')} className="text-green-400 hover:text-green-300">✔</button>
+                                    <button onClick={() => handleRequestAction(fid, 'reject')} className="text-red-400 hover:text-red-300">✖</button>
+                                </div>
+                            </div>
+                        ))}
+                     </div>
+                )}
+
+                <div className="space-y-1">
+                    {myFriendObjects.map(f => (
+                        <div 
+                            key={f.id} 
+                            onClick={() => handleJoinRoom(`private-${[currentUser.id, f.id].sort().join('-')}`)}
+                            className="flex items-center gap-2 p-2 hover:bg-white/5 rounded cursor-pointer transition-colors"
+                        >
+                            <div className="w-2 h-2 rounded-full bg-gray-500"></div>
+                            <span className="text-sm">{f.username}</span>
+                        </div>
+                    ))}
+                    {myFriendObjects.length === 0 && <p className="text-[10px] text-gray-600 italic">No active contacts.</p>}
+                </div>
+            </div>
+
+            {/* Rooms Section */}
+            <div>
+                <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Channels</h3>
+                <div className="flex gap-2 mb-2">
+                    <input 
+                         type="text" 
+                         value={newRoomName}
+                         onChange={e => setNewRoomName(e.target.value)}
+                         placeholder="New Channel"
+                         className="w-full bg-black/30 border border-gray-700 rounded px-2 py-1 text-xs focus:border-primary outline-none"
+                    />
+                    <button onClick={handleCreateRoom} className="bg-primary/20 text-primary border border-primary/50 rounded px-2 text-xs hover:bg-primary/30">+</button>
+                </div>
+                 
+                <div className="space-y-1">
+                    {availableRooms.map(room => (
+                         <div 
+                            key={room.id}
+                            onClick={() => handleJoinRoom(room.id)}
+                            className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${currentRoom?.id === room.id ? 'bg-primary/20 text-primary border border-primary/30' : 'hover:bg-white/5'}`}
+                         >
+                            <span className="text-xs">#</span>
+                            <span className="text-sm truncate">{room.name}</span>
+                         </div>
+                    ))}
+                </div>
+            </div>
+
+            {/* Join by ID */}
+            <div>
+                 <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Direct Link</h3>
+                 <div className="flex gap-2">
+                     <input 
+                         type="text" 
+                         value={joinRoomId} 
+                         onChange={e => setJoinRoomId(e.target.value)}
+                         placeholder="Room ID"
+                         className="w-full bg-black/30 border border-gray-700 rounded px-2 py-1 text-xs focus:border-primary outline-none"
+                     />
+                     <button onClick={() => handleJoinRoom()} className="bg-gray-700 hover:bg-gray-600 rounded px-3 text-xs">JOIN</button>
                  </div>
-             </div>
-        )}
+            </div>
+        </div>
+
+        <div className="p-4 border-t border-gray-700">
+             <button onClick={logout} className="w-full py-2 bg-red-900/30 text-red-500 border border-red-900/50 hover:bg-red-900/50 rounded text-xs tracking-wider uppercase">Disconnect</button>
+        </div>
       </div>
 
-      {/* Input Area */}
-      <footer className="flex-none p-4 bg-gray-800 border-t border-gray-700">
-        <div className="max-w-4xl mx-auto flex gap-4 items-end">
-            <button 
-                onClick={() => fileInputRef.current?.click()}
-                className="p-3 text-gray-400 hover:text-white bg-gray-700 rounded-lg hover:bg-gray-600 transition-colors"
-                title="Attach 10GB Max"
-            >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
-            </button>
-            <input 
-                type="file" 
-                ref={fileInputRef} 
-                className="hidden" 
-                onChange={(e) => {
-                    if (e.target.files?.[0]) handleSendMessage(e.target.files[0]);
-                }}
-            />
+      {/* Main Chat Area */}
+      <div className="flex-1 flex flex-col bg-gray-900 relative">
+         {!currentRoom ? (
+             <div className="flex-1 flex flex-col items-center justify-center text-gray-600 opacity-50">
+                 <div className="w-24 h-24 rounded-full border-4 border-gray-700 flex items-center justify-center mb-4">
+                     <div className="w-20 h-20 bg-gray-800 rounded-full animate-pulse"></div>
+                 </div>
+                 <p className="tracking-widest uppercase">Select a frequency to begin transmission</p>
+             </div>
+         ) : (
+             <>
+                {/* Chat Header */}
+                <div className="h-16 bg-gray-800/50 backdrop-blur border-b border-gray-700 flex justify-between items-center px-6">
+                    <div>
+                        <h2 className="font-bold text-white flex items-center gap-2">
+                            {currentRoom.type === 'private' ? '🔒 PRIVATE LINK' : `# ${currentRoom.name}`}
+                            <span className="text-[10px] bg-gray-700 px-1 rounded text-gray-400 font-mono">{currentRoom.id}</span>
+                        </h2>
+                        <p className="text-[10px] text-gray-400">{currentRoom.participants.length} connected entities</p>
+                    </div>
+                    <div className="flex gap-4">
+                        <button 
+                            onClick={() => setIsVoiceActive(true)}
+                            className="bg-primary/20 hover:bg-primary/30 text-primary px-3 py-1 rounded-full border border-primary/50 text-xs flex items-center gap-2 transition-all shadow-[0_0_15px_rgba(59,130,246,0.2)]"
+                        >
+                            <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+                            SECURE VOICE
+                        </button>
+                    </div>
+                </div>
 
-            <div className="flex-1 bg-gray-900 rounded-lg border border-gray-600 focus-within:border-primary transition-colors flex items-center relative">
-                <textarea
-                    value={inputText}
-                    onChange={(e) => setInputText(e.target.value)}
-                    onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            handleSendMessage();
+                {/* Messages */}
+                <div 
+                    ref={chatContainerRef}
+                    className="flex-1 overflow-y-auto p-6 space-y-6"
+                    style={{ backgroundImage: 'radial-gradient(circle at center, #1e293b 1px, transparent 1px)', backgroundSize: '24px 24px' }}
+                >
+                    {currentRoom.messages.map((msg) => {
+                        const isMe = msg.sender === 'user' && msg.senderName === currentUser.username;
+                        const isSystem = msg.sender === 'system';
+                        const isAI = msg.sender === 'ai';
+                        const content = msg.isEncrypted ? decryptMessage(msg.content) : msg.content;
+
+                        if (isSystem) {
+                            return (
+                                <div key={msg.id} className="flex justify-center my-4">
+                                    <span className="bg-gray-800/80 text-gray-400 text-[10px] px-3 py-1 rounded-full border border-gray-700 font-mono">
+                                        SYSTEM: {content}
+                                    </span>
+                                </div>
+                            );
                         }
-                    }}
-                    placeholder={`Encrypting to #${currentRoom.type === 'private' ? 'DIRECT' : currentRoom.id}... (Type @ai to summon bot)`}
-                    className="w-full bg-transparent text-white p-3 max-h-32 focus:outline-none resize-none"
-                    rows={1}
-                />
-            </div>
 
-            <button 
-                onClick={() => handleSendMessage()}
-                disabled={isLoading || (!inputText.trim() && !fileInputRef.current?.value)}
-                className="p-3 bg-primary hover:bg-primary-dark text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all transform active:scale-95"
-            >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
-            </button>
-        </div>
-      </footer>
+                        return (
+                            <div key={msg.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'} group`}>
+                                <div className={`max-w-[70%] ${isMe ? 'items-end' : 'items-start'} flex flex-col`}>
+                                    <div className="flex items-center gap-2 mb-1 px-1">
+                                        <span className={`text-[10px] font-bold ${isAI ? 'text-purple-400' : isMe ? 'text-primary' : 'text-gray-400'}`}>
+                                            {isMe ? 'YOU' : msg.senderName}
+                                        </span>
+                                        <span className="text-[9px] text-gray-600 font-mono">{new Date(msg.timestamp).toLocaleTimeString()}</span>
+                                    </div>
+                                    
+                                    <div className={`p-3 rounded-lg backdrop-blur-sm border relative ${
+                                        isAI ? 'bg-purple-900/20 border-purple-500/30 rounded-tl-none shadow-[0_0_15px_rgba(168,85,247,0.1)]' :
+                                        isMe ? 'bg-primary/20 border-primary/30 rounded-tr-none text-white' : 
+                                        'bg-gray-800/80 border-gray-700 rounded-tl-none'
+                                    }`}>
+                                        {msg.type === 'text' && <p className="whitespace-pre-wrap break-words text-sm">{content}</p>}
+                                        {msg.type === 'image' && (
+                                            <div className="rounded overflow-hidden border border-gray-700/50 mt-1">
+                                                <img src={`data:image/png;base64,${content}`} alt="attachment" className="max-w-xs max-h-64 object-cover" />
+                                            </div>
+                                        )}
+                                        {msg.fileName && (
+                                            <div className="flex items-center gap-2 text-xs bg-black/20 p-2 rounded mt-2">
+                                                <span>📎</span>
+                                                <span>{msg.fileName}</span>
+                                                <span className="opacity-50">({formatBytes(msg.fileSize || 0)})</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="px-1 mt-1 text-[9px]">
+                                        {getReadReceiptText(msg)}
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
 
-      {/* Voice Modal */}
-      {isVoiceActive && (
-          <VoiceInterface 
-            apiKey={apiKey} 
-            isActive={isVoiceActive} 
-            onClose={() => setIsVoiceActive(false)} 
-          />
-      )}
+                {/* Input Area */}
+                <div className="p-4 bg-gray-800/80 backdrop-blur border-t border-gray-700">
+                    <div className="flex gap-4 items-end max-w-5xl mx-auto">
+                         <button 
+                            onClick={() => fileInputRef.current?.click()}
+                            className="p-3 text-gray-400 hover:text-white transition-colors bg-gray-700/50 rounded-lg hover:bg-gray-700"
+                         >
+                            📎
+                         </button>
+                         <input 
+                            type="file" 
+                            ref={fileInputRef} 
+                            className="hidden" 
+                            onChange={(e) => { if(e.target.files?.[0]) handleSendMessage(e.target.files[0]) }}
+                         />
+                         
+                         <div className="flex-1 bg-gray-900/50 border border-gray-700 rounded-lg focus-within:border-primary/50 focus-within:shadow-[0_0_15px_rgba(59,130,246,0.1)] transition-all flex flex-col">
+                             <textarea
+                                value={inputText}
+                                onChange={(e) => setInputText(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if(e.key === 'Enter' && !e.shiftKey) {
+                                        e.preventDefault();
+                                        handleSendMessage();
+                                    }
+                                }}
+                                placeholder={currentUser.role === UserRole.ADMIN ? "Enter command (/ban, /kick, /mute) or message..." : "Type your encrypted message... (@ai to summon bot)"}
+                                className="w-full bg-transparent p-3 outline-none text-sm resize-none h-12 max-h-32"
+                             />
+                             {isLoading && <div className="h-0.5 w-full bg-gray-800 overflow-hidden rounded-b-lg"><div className="h-full bg-purple-500 animate-pulse w-full origin-left animate-[loading_1s_infinite]"></div></div>}
+                         </div>
+
+                         <button 
+                            onClick={() => handleSendMessage()}
+                            disabled={!inputText.trim() && !isLoading}
+                            className="p-3 bg-primary hover:bg-primary-dark disabled:opacity-50 disabled:hover:bg-primary text-white rounded-lg transition-all shadow-lg shadow-primary/20 font-bold"
+                         >
+                            SEND
+                         </button>
+                    </div>
+                </div>
+             </>
+         )}
+      </div>
+
+      <VoiceInterface 
+         apiKey={apiKey} 
+         isActive={isVoiceActive} 
+         onClose={() => setIsVoiceActive(false)} 
+      />
     </div>
   );
 };
