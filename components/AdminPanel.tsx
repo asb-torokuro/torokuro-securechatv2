@@ -1,5 +1,6 @@
+
 import React, { useEffect, useState } from 'react';
-import { clearLogs, getUsers, listenToLogs } from '../services/storageService';
+import { clearLogs, getUsers, subscribeToSystemLogs } from '../services/storageService';
 import { SystemLog, User } from '../types';
 
 interface AdminPanelProps {
@@ -14,7 +15,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout }) => {
 
   useEffect(() => {
     // Setup real-time listener for logs
-    const unsubscribeLogs = listenToLogs((updatedLogs) => {
+    const unsubscribeLogs = subscribeToSystemLogs((updatedLogs) => {
       setLogs(updatedLogs);
     });
 
