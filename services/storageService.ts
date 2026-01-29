@@ -1,3 +1,4 @@
+
 import { User, SystemLog, Room, Message, UserRole } from '../types';
 import { db } from './firebase';
 import { 
@@ -13,7 +14,8 @@ import {
   where,
   orderBy,
   limit,
-  addDoc
+  addDoc,
+  writeBatch
 } from "firebase/firestore";
 
 // --- Users & Auth ---
@@ -57,8 +59,7 @@ export const listenToUser = (userId: string, callback: (user: User | null) => vo
   });
 };
 
-// Real-time Friends Listener (Actually just listenting to user updates covers this, 
-// but we might need to fetch friend details)
+// Real-time Friends Listener
 export const searchUsersByName = async (username: string): Promise<User[]> => {
   const q = query(collection(db, "users"), where("username", "==", username));
   const querySnapshot = await getDocs(q);
@@ -75,7 +76,6 @@ export const sendFriendRequest = async (fromUserId: string, toUsername: string):
     if (targetUser.friends.includes(fromUserId)) return { success: false, message: 'Already friends' };
     if (targetUser.friendRequests.includes(fromUserId)) return { success: false, message: 'Request already sent' };
 
-    // Update target user's friendRequests
     const targetRef = doc(db, "users", targetUser.id);
     await updateDoc(targetRef, {
       friendRequests: arrayUnion(fromUserId)
@@ -94,25 +94,20 @@ export const handleFriendRequest = async (userId: string, requesterId: string, a
   if (!userSnap.exists()) return;
   const userData = userSnap.data() as User;
   
-  // Remove from requests
   const newRequests = userData.friendRequests.filter(id => id !== requesterId);
   await updateDoc(userRef, { friendRequests: newRequests });
 
   if (action === 'accept') {
-    // Add to my friends
     await updateDoc(userRef, { friends: arrayUnion(requesterId) });
     
-    // Add me to requester's friends
     const requesterRef = doc(db, "users", requesterId);
     await updateDoc(requesterRef, { friends: arrayUnion(userId) });
 
-    // Create Private Room
     const roomId = `private-${[userId, requesterId].sort().join('-')}`;
     const roomRef = doc(db, "rooms", roomId);
     const roomSnap = await getDoc(roomRef);
 
     if (!roomSnap.exists()) {
-       // Need usernames for the room name... ideally we fetch them, but for now:
        const requesterSnap = await getDoc(requesterRef);
        const rName = requesterSnap.exists() ? requesterSnap.data().username : 'Unknown';
        
@@ -166,19 +161,30 @@ export const joinRoom = async (roomId: string, userId: string, isAdmin: boolean 
   return { success: true };
 };
 
-// Real-time Room Listener
+// Real-time Room Listener (Metadata Only)
 export const listenToRoom = (roomId: string, callback: (room: Room | null) => void) => {
   return onSnapshot(doc(db, "rooms", roomId), (doc) => {
     if (doc.exists()) {
-      callback(doc.data() as Room);
+      const data = doc.data() as Room;
+      callback({ ...data, messages: [] }); 
     } else {
-      callback(null); // Room might be deleted or not found
+      callback(null); 
     }
   });
 };
 
-// Listen to all public rooms that I am part of (or all public rooms for lobby)
-// Simplified: Just listen to all 'group' type rooms
+// Real-time Messages Listener (Subcollection)
+// 確実にエクスポートするよ
+export const listenToMessages = (roomId: string, callback: (messages: Message[]) => void) => {
+    const messagesRef = collection(db, "rooms", roomId, "messages");
+    const q = query(messagesRef, orderBy("timestamp", "asc"), limit(200));
+    
+    return onSnapshot(q, (snapshot) => {
+        const msgs = snapshot.docs.map(doc => doc.data() as Message);
+        callback(msgs);
+    });
+};
+
 export const listenToPublicRooms = (callback: (rooms: Room[]) => void) => {
   const q = query(collection(db, "rooms"), where("type", "==", "group"));
   return onSnapshot(q, (snapshot) => {
@@ -188,35 +194,34 @@ export const listenToPublicRooms = (callback: (rooms: Room[]) => void) => {
 };
 
 export const addMessageToRoom = async (roomId: string, message: Message) => {
-  const roomRef = doc(db, "rooms", roomId);
-  await updateDoc(roomRef, {
-    messages: arrayUnion(message)
-  });
+  const messageRef = doc(db, "rooms", roomId, "messages", message.id);
+  await setDoc(messageRef, message);
 };
 
-export const markMessagesAsRead = async (roomId: string, userId: string, room: Room) => {
-  // Firestore array updates are tricky for nested objects.
-  // In a production app, messages should be a subcollection.
-  // For this demo structure, we have to read, modify, write back the WHOLE array.
-  // We will debounce this or only do it if necessary.
-  
-  let hasChanges = false;
-  const updatedMessages = room.messages.map(msg => {
-     if (msg.sender === 'user' && !msg.readBy.includes(userId) && msg.senderName !== userId /* simplified check */) {
-        hasChanges = true;
-        return { ...msg, readBy: [...msg.readBy, userId] };
-     }
-     return msg;
-  });
+export const markMessagesAsRead = async (roomId: string, userId: string, messages: Message[]) => {
+  const batch = writeBatch(db);
+  let updateCount = 0;
+  const maxBatch = 400; 
 
-  if (hasChanges) {
-    const roomRef = doc(db, "rooms", roomId);
-    await updateDoc(roomRef, { messages: updatedMessages });
+  for (const msg of messages) {
+      if (updateCount >= maxBatch) break;
+      if (msg.sender === 'user' && !msg.readBy.includes(userId) && msg.senderName !== userId) { 
+          const msgRef = doc(db, "rooms", roomId, "messages", msg.id);
+          batch.update(msgRef, { readBy: arrayUnion(userId) });
+          updateCount++;
+      }
+  }
+
+  if (updateCount > 0) {
+      try {
+        await batch.commit();
+      } catch (e) {
+          console.error("Batch update failed", e);
+      }
   }
 };
 
 // --- Logs ---
-// Moving logs to Firestore 'logs' collection
 export const addLog = async (event: string, details: string, level: 'info' | 'warning' | 'alert' = 'info') => {
   const newLog: SystemLog = {
     id: Date.now().toString() + Math.random().toString().slice(2, 5),
@@ -237,8 +242,6 @@ export const listenToLogs = (callback: (logs: SystemLog[]) => void) => {
 };
 
 export const clearLogs = async () => {
-  // Not easily possible to clear all in Firestore without Cloud Functions or iterating delete
-  // Skipping for this demo
   console.log("Log clearing not fully implemented for Firestore client-side demo");
 };
 
