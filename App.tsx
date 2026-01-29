@@ -31,7 +31,7 @@ const App = () => {
 
   // Room State
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null);
-  const [roomMessages, setRoomMessages] = useState<Message[]>([]); // メッセージは別ステートで管理
+  const [roomMessages, setRoomMessages] = useState<Message[]>([]); // メッセージはここで管理する
   const [joinRoomId, setJoinRoomId] = useState('');
   const [newRoomName, setNewRoomName] = useState('');
   const [availableRooms, setAvailableRooms] = useState<Room[]>([]);
@@ -56,7 +56,6 @@ const App = () => {
   useEffect(() => {
     if (!currentUser) return;
     
-    // 管理者はFirestore上に存在しない仮想ユーザーのため、リスナーを設定しない
     if (currentUser.role === UserRole.ADMIN) return;
 
     const unsubscribe = listenToUser(currentUser.id, (updatedUser) => {
@@ -80,7 +79,7 @@ const App = () => {
     return () => unsubscribe();
   }, [currentUser?.id, currentUser?.role]);
 
-  // ルーム情報のリスナー（メタデータのみ）
+  // ルーム情報取得（メタデータのみ）
   useEffect(() => {
     if (!currentRoom) return;
     const unsubscribe = listenToRoom(currentRoom.id, (updatedRoom) => {
@@ -102,13 +101,13 @@ const App = () => {
              setRoomMessages([]);
              return;
          }
-         // メッセージはlistenToMessagesで取得するため、ここでは上書きしないように注意
+         // メッセージはサブコレクションから取るからここは空配列で更新
          setCurrentRoom(prev => prev ? { ...updatedRoom, messages: [] } : updatedRoom);
     });
     return () => unsubscribe();
   }, [currentRoom?.id]);
 
-  // メッセージ履歴のリスナー（サブコレクション）
+  // メッセージ取得（サブコレクション）
   useEffect(() => {
       if (!currentRoom) return;
       
@@ -256,7 +255,7 @@ const App = () => {
         addLog('ROOM_JOIN', `User ${currentUser.username} joining ${targetId}`, 'info');
         setJoinRoomId('');
         setCurrentRoom({ id: targetId } as Room);
-        setRoomMessages([]); // 部屋切り替え時にメッセージをリセット
+        setRoomMessages([]);
     } else {
       alert(result.error || 'Room not found or access denied');
     }
