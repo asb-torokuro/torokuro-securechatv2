@@ -12,7 +12,7 @@ import { hashPassword, verifyPassword, encryptMessage, decryptMessage, formatByt
 import { 
   addUser, getUsers, addLog, createRoom, joinRoom, addMessageToRoom, 
   markMessagesAsRead, sendFriendRequest, handleFriendRequest, getUserById,
-  executeCommand, listenToUser, listenToRoom, listenToPublicRooms, searchUsersByName, recordUserLogin,
+  executeCommand, listenToUser, listenToRoom, listenToJoinedGroups, searchUsersByName, recordUserLogin,
   listenToMessages
 } from './services/storageService';
 import AdminPanel from './components/AdminPanel';
@@ -121,7 +121,8 @@ const App = () => {
       if (!currentUser) return;
       if (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.USER) return;
 
-      const unsubscribe = listenToPublicRooms((rooms) => {
+      // 参加しているグループのみを表示する（以前は全パブリックルームを表示していた）
+      const unsubscribe = listenToJoinedGroups(currentUser.id, (rooms) => {
           setAvailableRooms(rooms);
       });
       return () => unsubscribe();
@@ -226,8 +227,13 @@ const App = () => {
     setAuthError({ type: null, message: '' });
   };
 
+  const generateUniqueId = () => {
+      return Date.now().toString() + Math.random().toString(36).substring(2, 9);
+  };
+
   const handleCreateRoom = async () => {
     if (!newRoomName.trim() || !currentUser) return;
+    // ID生成を強化して衝突を防ぐ
     const roomId = Math.floor(1000000 + Math.random() * 9000000).toString();
     const newRoom: Room = {
       id: roomId,
@@ -291,7 +297,7 @@ const App = () => {
             if (target) {
                 const result = await executeCommand(currentRoom.id, currentUser.id, command, target);
                 const sysMsg: Message = {
-                    id: Date.now().toString(),
+                    id: generateUniqueId(),
                     sender: 'system',
                     content: encryptMessage(`ADMIN CMD: ${result}`),
                     timestamp: Date.now(),
@@ -329,8 +335,9 @@ const App = () => {
       }
     }
 
+    // ID生成を強化 (Date.now() + Random)
     const userMsg: Message = {
-      id: Date.now().toString(),
+      id: generateUniqueId(),
       sender: 'user',
       senderName: currentUser.username,
       content: encryptMessage(inputText || (file ? `Sent a file: ${file.name}` : '')),
@@ -351,7 +358,7 @@ const App = () => {
         if (prompt.toLowerCase().includes('@ai')) {
           if (!apiKey) {
              const sysMsg: Message = {
-                 id: Date.now().toString(),
+                 id: generateUniqueId(),
                  sender: 'system',
                  content: encryptMessage("SYSTEM: AI capabilities unavailable (Missing API Key)."),
                  timestamp: Date.now(),
@@ -392,7 +399,7 @@ const App = () => {
             }
 
             const aiMsg: Message = {
-              id: (Date.now() + 1).toString(),
+              id: generateUniqueId(),
               sender: 'ai',
               senderName: 'AI_TERMINAL',
               content: encryptMessage(responseText),
@@ -405,7 +412,7 @@ const App = () => {
           } catch (err: any) {
               console.error(err);
               const errorMsg: Message = {
-                  id: Date.now().toString(),
+                  id: generateUniqueId(),
                   sender: 'system',
                   content: encryptMessage(`Error: ${err.message}`),
                   timestamp: Date.now(),
