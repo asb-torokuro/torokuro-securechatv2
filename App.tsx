@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { User, UserRole, Message, Room } from './types';
 import { 
@@ -8,12 +7,13 @@ import {
   CHAT_MODEL,
   VISION_MODEL
 } from './constants';
-import { hashPassword, verifyPassword, encryptMessage, decryptMessage, formatBytes } from './utils/security';
+import { encryptMessage, decryptMessage, formatBytes } from './utils/security';
 import { 
-  addUser, getUsers, addLog, createRoom, joinRoom, addMessageToRoom, 
+  addLog, createRoom, joinRoom, addMessageToRoom, 
   markMessagesAsRead, sendFriendRequest, handleFriendRequest, getUserById,
   executeCommand, listenToUser, listenToRoom, listenToJoinedGroups, searchUsersByName, recordUserLogin,
-  listenToMessages
+  listenToMessages,
+  loginUser, registerUser, logoutUser, subscribeToAuthChanges
 } from './services/storageService';
 import AdminPanel from './components/AdminPanel';
 import VoiceInterface from './components/VoiceInterface';
@@ -52,12 +52,23 @@ const App = () => {
   const apiKey = process.env.API_KEY || ''; 
 
   // --- Real-time Listeners ---
+
+  // Auth Listener
+  useEffect(() => {
+    const unsubscribe = subscribeToAuthChanges((user) => {
+        if (currentUser?.id !== 'admin-root') { // Don't overwrite admin session
+            setCurrentUser(user);
+        }
+    });
+    return () => unsubscribe();
+  }, [currentUser?.id]);
   
   useEffect(() => {
     if (!currentUser) return;
     
     if (currentUser.role === UserRole.ADMIN) return;
 
+    // Listen for changes in the specific user document (friends, requests, etc.)
     const unsubscribe = listenToUser(currentUser.id, (updatedUser) => {
         if (updatedUser) {
              setCurrentUser(updatedUser);
@@ -72,8 +83,6 @@ const App = () => {
                  setMyFriendObjects(friendsData);
              };
              fetchFriends();
-        } else {
-            logout();
         }
     });
     return () => unsubscribe();
@@ -107,12 +116,20 @@ const App = () => {
     return () => unsubscribe();
   }, [currentRoom?.id]);
 
-  // メッセージ取得（サブコレクション）
+  // メッセージ取得（サブコレクション）＆ 復号化処理
   useEffect(() => {
       if (!currentRoom) return;
       
-      const unsubscribe = listenToMessages(currentRoom.id, (msgs) => {
-          setRoomMessages(msgs);
+      const unsubscribe = listenToMessages(currentRoom.id, async (msgs) => {
+          // メッセージが到着したら非同期で復号を行う
+          const decryptedMessages = await Promise.all(msgs.map(async (msg) => {
+             if (msg.isEncrypted) {
+                 const decryptedContent = await decryptMessage(msg.content);
+                 return { ...msg, content: decryptedContent };
+             }
+             return msg;
+          }));
+          setRoomMessages(decryptedMessages);
       });
       return () => unsubscribe();
   }, [currentRoom?.id]);
@@ -121,7 +138,7 @@ const App = () => {
       if (!currentUser) return;
       if (currentUser.role !== UserRole.ADMIN && currentUser.role !== UserRole.USER) return;
 
-      // 参加しているグループのみを表示する（以前は全パブリックルームを表示していた）
+      // 参加しているグループのみを表示する
       const unsubscribe = listenToJoinedGroups(currentUser.id, (rooms) => {
           setAvailableRooms(rooms);
       });
@@ -133,13 +150,6 @@ const App = () => {
       markMessagesAsRead(currentRoom.id, currentUser.id, roomMessages);
     }
   }, [roomMessages.length, currentRoom?.id]); 
-
-  const withTimeout = <T,>(promise: Promise<T>, ms: number = 8000): Promise<T> => {
-      return Promise.race([
-          promise,
-          new Promise<T>((_, reject) => setTimeout(() => reject(new Error("Database connection timeout. Firebaseの設定を確認してください。")), ms))
-      ]);
-  };
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -153,12 +163,14 @@ const App = () => {
             return;
         }
 
+        // Hardcoded Admin Login (Bypass Firebase Auth)
         if (username === ADMIN_USERNAME) {
             if(password === ADMIN_PASSWORD) {
+                // btoa for simplified admin hash check (dummy)
                 const adminUser: User = {
                     id: 'admin-root',
                     username: ADMIN_USERNAME,
-                    passwordHash: hashPassword(ADMIN_PASSWORD),
+                    passwordHash: btoa(ADMIN_PASSWORD), 
                     role: UserRole.ADMIN,
                     createdAt: Date.now(),
                     friends: [],
@@ -166,48 +178,49 @@ const App = () => {
                 };
                 setCurrentUser(adminUser);
                 addLog('LOGIN_SUCCESS', `Admin access granted`, 'alert');
+                setIsAuthProcessing(false);
                 return;
             } else {
                 setAuthError({ type: 'password', message: '管理者パスワードが違います。' });
+                setIsAuthProcessing(false);
                 return;
             }
         }
 
+        // Firebase Auth Login/Register
         if (isLogin) {
-            const foundUsers = await withTimeout(searchUsersByName(username));
-            if (foundUsers.length === 0) {
-                setAuthError({ type: 'username', message: 'ユーザーが見つかりません。' });
-                return;
-            }
-            const user = foundUsers[0];
-            if (verifyPassword(password, user.passwordHash)) {
-                setCurrentUser(user);
-                recordUserLogin(user.id).catch(console.error);
+            try {
+                const user = await loginUser(username, password);
                 addLog('LOGIN_SUCCESS', `User ${username} logged in`, 'info');
-            } else {
-                setAuthError({ type: 'password', message: 'パスワードが正しくありません。' });
-                addLog('LOGIN_FAIL', `Bad password for ${username}`, 'warning');
+            } catch (err: any) {
+                console.error(err);
+                if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+                    setAuthError({ type: 'general', message: 'ユーザー名またはパスワードが間違っています。' });
+                } else {
+                    setAuthError({ type: 'general', message: err.message });
+                }
             }
         } else {
-            const foundUsers = await withTimeout(searchUsersByName(username));
-            if (foundUsers.length > 0) {
-                setAuthError({ type: 'username', message: 'そのユーザー名は既に使用されています。' });
-                return;
+            // Register
+            try {
+                // Check if username already taken (via Firestore search)
+                const existingUsers = await searchUsersByName(username);
+                if (existingUsers.length > 0) {
+                    setAuthError({ type: 'username', message: 'そのユーザー名は既に使用されています。' });
+                    return;
+                }
+                const user = await registerUser(username, password);
+                addLog('REGISTER', `New user registered: ${username}`, 'info');
+            } catch (err: any) {
+                console.error(err);
+                if (err.code === 'auth/email-already-in-use') {
+                    setAuthError({ type: 'username', message: 'そのユーザー名は既に使用されています。' });
+                } else if (err.code === 'auth/weak-password') {
+                     setAuthError({ type: 'password', message: 'パスワードが弱すぎます（6文字以上）。' });
+                } else {
+                    setAuthError({ type: 'general', message: err.message });
+                }
             }
-            const newUser: User = {
-                id: Date.now().toString(),
-                username,
-                passwordHash: hashPassword(password),
-                role: UserRole.USER,
-                createdAt: Date.now(),
-                friends: [],
-                friendRequests: [],
-                loginHistory: []
-            };
-            await withTimeout(addUser(newUser));
-            recordUserLogin(newUser.id).catch(console.error);
-            setCurrentUser(newUser);
-            addLog('REGISTER', `New user registered: ${username}`, 'info');
         }
     } catch (error: any) {
         console.error(error);
@@ -217,8 +230,9 @@ const App = () => {
     }
   };
 
-  const logout = () => {
+  const logout = async () => {
     if(currentUser) addLog('LOGOUT', `User ${currentUser.username} logged out`, 'info');
+    await logoutUser();
     setCurrentUser(null);
     setCurrentRoom(null);
     setRoomMessages([]);
@@ -233,7 +247,6 @@ const App = () => {
 
   const handleCreateRoom = async () => {
     if (!newRoomName.trim() || !currentUser) return;
-    // ID生成を強化して衝突を防ぐ
     const roomId = Math.floor(1000000 + Math.random() * 9000000).toString();
     const newRoom: Room = {
       id: roomId,
@@ -296,10 +309,12 @@ const App = () => {
             const target = parts[1];
             if (target) {
                 const result = await executeCommand(currentRoom.id, currentUser.id, command, target);
+                // System logs/messages are encrypted too
+                const encryptedSysMsg = await encryptMessage(`ADMIN CMD: ${result}`);
                 const sysMsg: Message = {
                     id: generateUniqueId(),
                     sender: 'system',
-                    content: encryptMessage(`ADMIN CMD: ${result}`),
+                    content: encryptedSysMsg,
                     timestamp: Date.now(),
                     type: 'text',
                     isEncrypted: true,
@@ -335,12 +350,18 @@ const App = () => {
       }
     }
 
-    // ID生成を強化 (Date.now() + Random)
+    // Encrypt content (text or base64 file data)
+    const rawContent = inputText || (file ? base64File : ''); 
+    // Note: Ideally files are uploaded to Storage and URL is encrypted. 
+    // Here we are encrypting the base64 content itself or the text message.
+    // Large files might hit Firestore limits or encryption performance, but keeping structure as requested.
+    const encryptedContent = await encryptMessage(rawContent);
+
     const userMsg: Message = {
       id: generateUniqueId(),
       sender: 'user',
       senderName: currentUser.username,
-      content: encryptMessage(inputText || (file ? `Sent a file: ${file.name}` : '')),
+      content: encryptedContent,
       timestamp,
       type: msgType,
       isEncrypted: true,
@@ -355,12 +376,14 @@ const App = () => {
         if (fileInputRef.current) fileInputRef.current.value = '';
         addLog('MESSAGE_SENT', `User ${currentUser.username} sent message`, 'info');
 
+        // AI Logic
         if (prompt.toLowerCase().includes('@ai')) {
           if (!apiKey) {
+             const encError = await encryptMessage("SYSTEM: AI capabilities unavailable (Missing API Key).");
              const sysMsg: Message = {
                  id: generateUniqueId(),
                  sender: 'system',
-                 content: encryptMessage("SYSTEM: AI capabilities unavailable (Missing API Key)."),
+                 content: encError,
                  timestamp: Date.now(),
                  type: 'text',
                  isEncrypted: true,
@@ -381,7 +404,7 @@ const App = () => {
                   model: VISION_MODEL,
                   contents: {
                       parts: [
-                          { inlineData: { mimeType: file!.type, data: base64File } },
+                          { inlineData: { mimeType: file!.type, data: base64File } }, // Sending raw base64 to Gemini
                           { text: cleanPrompt || "Describe this." }
                       ]
                   }
@@ -398,11 +421,12 @@ const App = () => {
               responseText = response.text || "Transmission received.";
             }
 
+            const encAIResponse = await encryptMessage(responseText);
             const aiMsg: Message = {
               id: generateUniqueId(),
               sender: 'ai',
               senderName: 'AI_TERMINAL',
-              content: encryptMessage(responseText),
+              content: encAIResponse,
               timestamp: Date.now(),
               type: 'text',
               isEncrypted: true,
@@ -411,10 +435,11 @@ const App = () => {
             await addMessageToRoom(currentRoom.id, aiMsg);
           } catch (err: any) {
               console.error(err);
+              const encErr = await encryptMessage(`Error: ${err.message}`);
               const errorMsg: Message = {
                   id: generateUniqueId(),
                   sender: 'system',
-                  content: encryptMessage(`Error: ${err.message}`),
+                  content: encErr,
                   timestamp: Date.now(),
                   type: 'text',
                   isEncrypted: true,
@@ -463,7 +488,7 @@ const App = () => {
           <div className="text-center mb-8 relative">
             <div className="w-16 h-1 bg-primary mx-auto mb-4 shadow-[0_0_10px_#3b82f6]"></div>
             <h1 className="text-3xl font-bold text-white mb-2 tracking-[0.2em] text-shadow uppercase">Secure Chat</h1>
-            <p className="text-primary text-[10px] uppercase tracking-widest">Biometric Handshake Protocol v4.2</p>
+            <p className="text-primary text-[10px] uppercase tracking-widest">Biometric Handshake Protocol v5.0 (AES-GCM)</p>
           </div>
 
           <form onSubmit={handleAuth} className="space-y-6">
@@ -673,7 +698,8 @@ const App = () => {
                         const isMe = msg.sender === 'user' && msg.senderName === currentUser.username;
                         const isSystem = msg.sender === 'system';
                         const isAI = msg.sender === 'ai';
-                        const content = msg.isEncrypted ? decryptMessage(msg.content) : msg.content;
+                        // Content is already decrypted in useEffect
+                        const content = msg.content; 
 
                         if (isSystem) {
                             return (
