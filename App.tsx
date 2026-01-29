@@ -260,7 +260,9 @@ const App = () => {
   };
 
   const handleSendMessage = async (file?: File) => {
-    if ((!inputText.trim() && !file) || !currentUser || !apiKey || !currentRoom) return;
+    // Modified: Removed !apiKey check to allow messages without AI key
+    if ((!inputText.trim() && !file) || !currentUser || !currentRoom) return;
+    
     if (currentRoom.mutedUsers?.includes(currentUser.id) && currentUser.role !== UserRole.ADMIN) {
         alert("TRANSMISSION BLOCKED: You are muted.");
         return;
@@ -325,68 +327,87 @@ const App = () => {
       readBy: []
     };
 
-    await addMessageToRoom(currentRoom.id, userMsg);
-    const prompt = inputText;
-    setInputText('');
-    if (fileInputRef.current) fileInputRef.current.value = '';
-    addLog('MESSAGE_SENT', `User ${currentUser.username} sent message`, 'info');
+    try {
+        await addMessageToRoom(currentRoom.id, userMsg);
+        const prompt = inputText;
+        setInputText('');
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        addLog('MESSAGE_SENT', `User ${currentUser.username} sent message`, 'info');
 
-    if (prompt.toLowerCase().includes('@ai')) {
-      setIsLoading(true);
-      try {
-        const ai = new GoogleGenAI({ apiKey });
-        let responseText = '';
-        const cleanPrompt = prompt.replace(/@ai/ig, '').trim();
+        if (prompt.toLowerCase().includes('@ai')) {
+          if (!apiKey) {
+             const sysMsg: Message = {
+                 id: Date.now().toString(),
+                 sender: 'system',
+                 content: encryptMessage("SYSTEM: AI capabilities unavailable (Missing API Key)."),
+                 timestamp: Date.now(),
+                 type: 'text',
+                 isEncrypted: true,
+                 readBy: []
+             };
+             await addMessageToRoom(currentRoom.id, sysMsg);
+             return;
+          }
 
-        if (base64File && msgType === 'image') {
-          const response = await ai.models.generateContent({
-              model: VISION_MODEL,
-              contents: {
-                  parts: [
-                      { inlineData: { mimeType: file!.type, data: base64File } },
-                      { text: cleanPrompt || "Describe this." }
-                  ]
-              }
-          });
-          responseText = response.text || "Analyzed image.";
-        } else {
-          const response = await ai.models.generateContent({
-            model: CHAT_MODEL,
-            contents: cleanPrompt || "Hello.",
-            config: {
-              systemInstruction: "You are a secure encrypted terminal AI participating in a group chat. Keep responses brief."
+          setIsLoading(true);
+          try {
+            const ai = new GoogleGenAI({ apiKey });
+            let responseText = '';
+            const cleanPrompt = prompt.replace(/@ai/ig, '').trim();
+
+            if (base64File && msgType === 'image') {
+              const response = await ai.models.generateContent({
+                  model: VISION_MODEL,
+                  contents: {
+                      parts: [
+                          { inlineData: { mimeType: file!.type, data: base64File } },
+                          { text: cleanPrompt || "Describe this." }
+                      ]
+                  }
+              });
+              responseText = response.text || "Analyzed image.";
+            } else {
+              const response = await ai.models.generateContent({
+                model: CHAT_MODEL,
+                contents: cleanPrompt || "Hello.",
+                config: {
+                  systemInstruction: "You are a secure encrypted terminal AI participating in a group chat. Keep responses brief."
+                }
+              });
+              responseText = response.text || "Transmission received.";
             }
-          });
-          responseText = response.text || "Transmission received.";
-        }
 
-        const aiMsg: Message = {
-          id: (Date.now() + 1).toString(),
-          sender: 'ai',
-          senderName: 'AI_TERMINAL',
-          content: encryptMessage(responseText),
-          timestamp: Date.now(),
-          type: 'text',
-          isEncrypted: true,
-          readBy: []
-        };
-        await addMessageToRoom(currentRoom.id, aiMsg);
-      } catch (err: any) {
-          console.error(err);
-          const errorMsg: Message = {
-              id: Date.now().toString(),
-              sender: 'system',
-              content: encryptMessage(`Error: ${err.message}`),
+            const aiMsg: Message = {
+              id: (Date.now() + 1).toString(),
+              sender: 'ai',
+              senderName: 'AI_TERMINAL',
+              content: encryptMessage(responseText),
               timestamp: Date.now(),
               type: 'text',
               isEncrypted: true,
               readBy: []
-          };
-          await addMessageToRoom(currentRoom.id, errorMsg);
-          addLog('API_ERROR', err.message, 'warning');
-      } finally {
-          setIsLoading(false);
-      }
+            };
+            await addMessageToRoom(currentRoom.id, aiMsg);
+          } catch (err: any) {
+              console.error(err);
+              const errorMsg: Message = {
+                  id: Date.now().toString(),
+                  sender: 'system',
+                  content: encryptMessage(`Error: ${err.message}`),
+                  timestamp: Date.now(),
+                  type: 'text',
+                  isEncrypted: true,
+                  readBy: []
+              };
+              await addMessageToRoom(currentRoom.id, errorMsg);
+              addLog('API_ERROR', err.message, 'warning');
+          } finally {
+              setIsLoading(false);
+          }
+        }
+    } catch (e: any) {
+        console.error("Failed to send message", e);
+        alert("Failed to send message: " + e.message);
     }
   };
 
