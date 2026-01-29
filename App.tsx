@@ -12,7 +12,8 @@ import { hashPassword, verifyPassword, encryptMessage, decryptMessage, formatByt
 import { 
   addUser, getUsers, addLog, createRoom, joinRoom, addMessageToRoom, 
   markMessagesAsRead, sendFriendRequest, handleFriendRequest, getUserById,
-  executeCommand, listenToUser, listenToRoom, listenToPublicRooms, searchUsersByName, recordUserLogin
+  executeCommand, listenToUser, listenToRoom, listenToPublicRooms, searchUsersByName, recordUserLogin,
+  listenToMessages
 } from './services/storageService';
 import AdminPanel from './components/AdminPanel';
 import VoiceInterface from './components/VoiceInterface';
@@ -30,6 +31,7 @@ const App = () => {
 
   // Room State
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null);
+  const [roomMessages, setRoomMessages] = useState<Message[]>([]); // Messages are now managed separately
   const [joinRoomId, setJoinRoomId] = useState('');
   const [newRoomName, setNewRoomName] = useState('');
   const [availableRooms, setAvailableRooms] = useState<Room[]>([]);
@@ -55,7 +57,6 @@ const App = () => {
     if (!currentUser) return;
     
     // 管理者はFirestore上に存在しない仮想ユーザーのため、リスナーを設定しない
-    // これを設定するとFirestoreにデータがないため即座にlogout()が呼ばれてしまう
     if (currentUser.role === UserRole.ADMIN) return;
 
     const unsubscribe = listenToUser(currentUser.id, (updatedUser) => {
@@ -79,27 +80,42 @@ const App = () => {
     return () => unsubscribe();
   }, [currentUser?.id, currentUser?.role]);
 
+  // Listen to Room Metadata
   useEffect(() => {
     if (!currentRoom) return;
     const unsubscribe = listenToRoom(currentRoom.id, (updatedRoom) => {
          if (!updatedRoom) {
              alert("Room closed or unavailable.");
              setCurrentRoom(null);
+             setRoomMessages([]);
              return;
          }
          if (currentUser && updatedRoom.bannedUsers?.includes(currentUser.id) && currentUser.role !== UserRole.ADMIN) {
              alert("You have been banned.");
              setCurrentRoom(null);
+             setRoomMessages([]);
              return;
          }
          if (currentUser && !updatedRoom.participants?.includes(currentUser.id) && currentUser.role !== UserRole.ADMIN) {
              alert("You have been kicked.");
              setCurrentRoom(null);
+             setRoomMessages([]);
              return;
          }
-         setCurrentRoom(updatedRoom);
+         // Keep the messages state intact, only update room metadata
+         setCurrentRoom(prev => prev ? { ...updatedRoom, messages: [] } : updatedRoom);
     });
     return () => unsubscribe();
+  }, [currentRoom?.id]);
+
+  // Listen to Messages (Subcollection)
+  useEffect(() => {
+      if (!currentRoom) return;
+      
+      const unsubscribe = listenToMessages(currentRoom.id, (msgs) => {
+          setRoomMessages(msgs);
+      });
+      return () => unsubscribe();
   }, [currentRoom?.id]);
 
   useEffect(() => {
@@ -114,10 +130,10 @@ const App = () => {
   }, [currentUser]);
 
   useEffect(() => {
-    if (currentRoom && currentUser && currentRoom.messages) {
-      markMessagesAsRead(currentRoom.id, currentUser.id, currentRoom);
+    if (currentRoom && currentUser && roomMessages.length > 0) {
+      markMessagesAsRead(currentRoom.id, currentUser.id, roomMessages);
     }
-  }, [currentRoom?.messages?.length]);
+  }, [roomMessages.length, currentRoom?.id]); // Depend on roomMessages.length
 
   const withTimeout = <T,>(promise: Promise<T>, ms: number = 8000): Promise<T> => {
       return Promise.race([
@@ -206,6 +222,7 @@ const App = () => {
     if(currentUser) addLog('LOGOUT', `User ${currentUser.username} logged out`, 'info');
     setCurrentUser(null);
     setCurrentRoom(null);
+    setRoomMessages([]);
     setUsername('');
     setPassword('');
     setAuthError({ type: null, message: '' });
@@ -240,6 +257,7 @@ const App = () => {
         addLog('ROOM_JOIN', `User ${currentUser.username} joining ${targetId}`, 'info');
         setJoinRoomId('');
         setCurrentRoom({ id: targetId } as Room);
+        setRoomMessages([]); // Clear previous messages immediately
     } else {
       alert(result.error || 'Room not found or access denied');
     }
@@ -415,7 +433,7 @@ const App = () => {
     if (chatContainerRef.current) {
       chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
     }
-  }, [currentRoom?.messages]);
+  }, [roomMessages]); // Update scroll when messages change
 
   const getReadReceiptText = (msg: Message) => {
     if (msg.sender !== 'user' || !currentRoom) return null;
@@ -648,7 +666,7 @@ const App = () => {
                     className="flex-1 overflow-y-auto p-6 space-y-6"
                     style={{ backgroundImage: 'radial-gradient(circle at center, #1e293b 1px, transparent 1px)', backgroundSize: '24px 24px' }}
                 >
-                    {(currentRoom.messages || []).map((msg) => {
+                    {(roomMessages || []).map((msg) => {
                         const isMe = msg.sender === 'user' && msg.senderName === currentUser.username;
                         const isSystem = msg.sender === 'system';
                         const isAI = msg.sender === 'ai';
