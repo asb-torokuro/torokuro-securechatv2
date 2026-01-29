@@ -1,8 +1,11 @@
+// Import the functions you need from the SDKs you need
 import { initializeApp } from "firebase/app";
 import { getAnalytics } from "firebase/analytics";
-import { getFirestore, collection } from "firebase/firestore";  // Firestore用
-import { getAuth } from "firebase/auth";  // 認証用 ←追加
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
 
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
   apiKey: "AIzaSyAgufDg2Zgj-aWtYcjf-Eb52Yy6h9uxrIc",
   authDomain: "chat-toro-c6ebb.firebaseapp.com",
@@ -13,9 +16,6 @@ const firebaseConfig = {
   measurementId: "G-009GFLVM31"
 };
 
+// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 const analytics = getAnalytics(app);
-
-// ここ追加
-export const db = getFirestore(app);
-export const auth = getAuth(app);
