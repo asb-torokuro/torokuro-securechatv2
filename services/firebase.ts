@@ -1,10 +1,9 @@
 
-import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
-import { getAnalytics } from "firebase/analytics";
-import { getAuth } from "firebase/auth";
+import firebase from "firebase/app";
+import "firebase/auth";
+import "firebase/firestore";
+import "firebase/analytics";
 
-// Your web app's Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyAgufDg2Zgj-aWtYcjf-Eb52Yy6h9uxrIc",
   authDomain: "chat-toro-c6ebb.firebaseapp.com",
@@ -15,12 +14,15 @@ const firebaseConfig = {
   measurementId: "G-009GFLVM31"
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
-export const auth = getAuth(app);
+// Initialize Firebase (check for existing apps to avoid re-initialization error)
+if (!firebase.apps.length) {
+  firebase.initializeApp(firebaseConfig);
+}
 
-// Analyticsはブラウザ環境でのみ初期化（ビルドエラー防止のため安全策）
+export const db = firebase.firestore();
+export const auth = firebase.auth();
+
+// Analytics is only available in browser environment
 if (typeof window !== 'undefined') {
-  getAnalytics(app);
+  firebase.analytics();
 }
