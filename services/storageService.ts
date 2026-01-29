@@ -174,7 +174,6 @@ export const listenToRoom = (roomId: string, callback: (room: Room | null) => vo
 };
 
 // Real-time Messages Listener (Subcollection)
-// 確実にエクスポートするよ
 export const listenToMessages = (roomId: string, callback: (messages: Message[]) => void) => {
     const messagesRef = collection(db, "rooms", roomId, "messages");
     const q = query(messagesRef, orderBy("timestamp", "asc"), limit(200));
@@ -185,10 +184,14 @@ export const listenToMessages = (roomId: string, callback: (messages: Message[])
     });
 };
 
-export const listenToPublicRooms = (callback: (rooms: Room[]) => void) => {
-  const q = query(collection(db, "rooms"), where("type", "==", "group"));
+// 自分が参加しているグループのみをリッスンする（パブリック全公開をやめる）
+// クライアントサイドフィルタリングで 'group' タイプのみを返す
+export const listenToJoinedGroups = (userId: string, callback: (rooms: Room[]) => void) => {
+  const q = query(collection(db, "rooms"), where("participants", "array-contains", userId));
   return onSnapshot(q, (snapshot) => {
-    const rooms = snapshot.docs.map(doc => doc.data() as Room);
+    const rooms = snapshot.docs
+        .map(doc => doc.data() as Room)
+        .filter(r => r.type === 'group'); 
     callback(rooms);
   });
 };
