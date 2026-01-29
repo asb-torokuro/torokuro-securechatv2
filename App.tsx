@@ -14,7 +14,6 @@ import {
   markMessagesAsRead, sendFriendRequest, handleFriendRequest, getUserById,
   executeCommand, listenToUser, listenToRoom, listenToPublicRooms, searchUsersByName, recordUserLogin
 } from './services/storageService';
-import { isFirebaseConfigured } from './services/firebase';
 import AdminPanel from './components/AdminPanel';
 import VoiceInterface from './components/VoiceInterface';
 import { GoogleGenAI } from '@google/genai';
@@ -124,15 +123,6 @@ const App = () => {
     e.preventDefault();
     setAuthError({ type: null, message: '' });
     
-    // Check Firebase Config
-    if (!isFirebaseConfigured()) {
-        setAuthError({ 
-            type: 'general', 
-            message: 'Firebaseのキーが設定されていません。services/firebase.ts を編集してください。' 
-        });
-        return;
-    }
-
     setIsAuthProcessing(true);
 
     try {
