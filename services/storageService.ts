@@ -1,8 +1,7 @@
 
 import { User, SystemLog, Room, Message, UserRole } from '../types';
 import { db, auth } from './firebase';
-import firebase from 'firebase/app';
-import 'firebase/firestore';
+
 
 // --- Users & Auth (Firebase Authentication) ---
 
