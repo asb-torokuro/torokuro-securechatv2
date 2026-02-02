@@ -7,6 +7,9 @@
     <title>SecureChat System</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
+      // Polyfill process for browser environment to prevent ReferenceError in App.tsx
+      window.process = window.process || { env: {} };
+
       tailwind.config = {
         theme: {
           extend: {
