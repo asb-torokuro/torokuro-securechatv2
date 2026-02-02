@@ -1,8 +1,8 @@
 
 import { initializeApp } from "firebase/app";
+import { getAuth } from "firebase/auth";
+import { getFirestore } from "firebase/firestore";
 import { getAnalytics } from "firebase/analytics";
-import { getFirestore } from "firebase/firestore";  // v9形式
-import { getAuth } from "firebase/auth";          // v9形式
 
 const firebaseConfig = {
   apiKey: "AIzaSyAgufDg2Zgj-aWtYcjf-Eb52Yy6h9uxrIc",
@@ -14,10 +14,16 @@ const firebaseConfig = {
   measurementId: "G-009GFLVM31"
 };
 
+// Initialize Firebase
 const app = initializeApp(firebaseConfig);
-const analytics = getAnalytics(app);
-
-// v9形式で export
-export const db = getFirestore(app);
 export const auth = getAuth(app);
-export { analytics };
+export const db = getFirestore(app);
+
+// Initialize Analytics only in browser
+if (typeof window !== 'undefined') {
+  try {
+    getAnalytics(app);
+  } catch (e) {
+    console.warn("Firebase Analytics init failed", e);
+  }
+}
